@@ -1,9 +1,10 @@
-import os, json, base64, sqlite3, asyncio, re, time, smtplib, ssl, hmac
+import os, json, base64, sqlite3, asyncio, re, time, smtplib, ssl, hmac, csv, io
+import urllib.request, urllib.parse
 from email.message import EmailMessage
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import edge_tts
@@ -178,6 +179,31 @@ def send_email(ticket_id: int, dep: str, urgency: str, summary: str, location, d
         print("Email failed:", repr(e)[:120])
 
 
+# ---------------------------------------------------------------- real action: Telegram message to the department
+# Optional. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID. Uses HTTPS (port 443), so it works on Render's free plan
+# where SMTP ports are blocked. Confidential cases never put their details into the chat.
+def send_telegram(ticket_id: int, dep: str, urgency: str, summary: str, location, deadline, confidential: bool):
+    token, chat = os.getenv("TELEGRAM_BOT_TOKEN", "").strip(), os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not (token and chat):
+        return
+    try:
+        if confidential:
+            text = f"CONFIDENTIAL ticket #{ticket_id} for {dep} ({urgency.upper()}). Details withheld, see the dashboard."
+        else:
+            text = (f"New Awaaz ticket #{ticket_id}\nDepartment: {dep}\nUrgency: {urgency.upper()}\n"
+                    f"Location: {location or 'not given'}\nDeadline: {deadline or 'none'}\n\nIssue: {summary}")
+        data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            ok = 200 <= r.status < 300
+        if ok:
+            with db() as c:
+                c.execute("UPDATE tickets SET emailed=1 WHERE id=?", (ticket_id,))   # "notified" tag on the dashboard
+            print(f"Telegram sent for ticket {ticket_id}")
+    except Exception as e:
+        print("Telegram failed:", type(e).__name__, str(e)[:80].replace(token, "***"))
+
+
 # ---------------------------------------------------------------- language detection + reply templates
 SCRIPT = re.compile(r"[\u0900-\u097F\u0600-\u06FF]")   # Devanagari or Arabic/Urdu script
 LATIN = re.compile(r"[A-Za-z]")
@@ -281,6 +307,9 @@ def norm_department(d):
     for k, v in DEPT_KEYS.items():
         if k in key or (len(key) >= 4 and key in k):
             return v
+    for w in re.findall(r"[a-z]+", str(d).lower()):      # "canteen food" -> Mess/Canteen
+        if w in DEPT_ALIAS:
+            return DEPT_ALIAS[w]
     return "Other"
 
 
@@ -330,8 +359,9 @@ def similar_issue(cat_a, sum_a, cat_b, sum_b) -> bool:
 def find_duplicate(c, plan):
     if not plan["department"] or not plan["location"]:
         return None
-    rows = c.execute("SELECT * FROM tickets WHERE status != 'resolved' AND department = ? ORDER BY id DESC",
-                     (plan["department"],)).fetchall()
+    rows = c.execute("SELECT * FROM tickets WHERE status != 'resolved' AND department = ? "
+                     "AND COALESCE(confidential, 0) = ? ORDER BY id DESC",
+                     (plan["department"], int(bool(plan["confidential"])))).fetchall()
     for r in rows:
         if same_place(r["location"], plan["location"]) and \
                 similar_issue(r["category"], r["summary"], plan["category"], plan["summary"]):
@@ -344,6 +374,8 @@ def valid_merge_target(row, plan) -> bool:
         return False
     if plan["department"] and row["department"] != plan["department"]:
         return False
+    if bool(row["confidential"]) != bool(plan["confidential"]):
+        return False                      # a private case is never merged into a public ticket
     if plan["location"] and not same_place(row["location"], plan["location"]):
         return False
     return True
@@ -385,7 +417,7 @@ SENTINEL = "Awaaz Campus Voice Desk"   # last words of both Whisper prompts: wha
 def is_prompt_echo(text: str) -> bool:
     """On silence or noise, Whisper sometimes parrots its own prompt. Never turn that into a ticket."""
     t = _norm(text)
-    if len(t) <= 3:
+    if not t:                      # nothing but punctuation. Short real answers (yes, no, ok, 2) are kept
         return True
     sn = _norm(SENTINEL)
     if t in sn or (sn in t and len(t.split()) <= 12):
@@ -644,9 +676,10 @@ async def process_text(text: str, session_id: str) -> dict:
                                  plan["summary"] or text, plan["location"], plan["urgency"],
                                  plan["deadline"], int(plan["confidential"]), now, now))
                 new_id = cur.lastrowid
-                asyncio.create_task(asyncio.to_thread(      # fire and forget: never delays the reply
-                    send_email, new_id, plan["department"] or "Other", plan["urgency"],
-                    plan["summary"] or text, plan["location"], plan["deadline"], bool(plan["confidential"])))
+                for notify in (send_email, send_telegram):  # fire and forget: never delays the reply
+                    asyncio.create_task(asyncio.to_thread(
+                        notify, new_id, plan["department"] or "Other", plan["urgency"],
+                        plan["summary"] or text, plan["location"], plan["deadline"], bool(plan["confidential"])))
                 kind = "create_conf" if plan["confidential"] else "create"
                 reply = fmt(kind, lang, id=cur.lastrowid, department=sp(plan["department"] or "Other"),
                             urgency=plan["urgency"])
@@ -718,6 +751,25 @@ def tickets():
                      category="[demo] Confidential" if demo else "Confidential")
         out.append(t)
     return out
+
+
+def _safe_cell(v):
+    s = "" if v is None else str(v)
+    return "'" + s if s[:1] in ("=", "+", "-", "@") else s       # stops spreadsheet formula injection
+
+
+@app.get("/api/export.csv")
+def export_csv():
+    """Download every ticket as a CSV. Reuses tickets(), so confidential details stay masked."""
+    cols = ["id", "department", "category", "summary", "location", "urgency", "deadline",
+            "status", "report_count", "created_at", "updated_at"]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(cols)
+    for t in tickets():
+        w.writerow([_safe_cell(t.get(k)) for k in cols])
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=awaaz_tickets.csv"})
 
 
 @app.post("/api/tickets/{tid}/resolve")

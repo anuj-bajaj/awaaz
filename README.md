@@ -2,12 +2,12 @@
 
 **Speak it. We'll raise it.**
 
-Awaaz is a voice-first grievance desk for a college campus. A student speaks a complaint in English, Hindi or Hinglish. Awaaz understands it, asks a spoken follow-up if something essential is missing, raises a ticket with the right department (or merges it into an existing ticket), emails the department, and answers back by voice. A live dashboard shows every ticket with urgency colours.
+Awaaz is a voice-first grievance desk for a college campus. A student speaks a complaint in English, Hindi or Hinglish. Awaaz understands it, asks a spoken follow-up if something essential is missing, raises a ticket with the right department (or merges it into an existing ticket), notifies the department (Telegram message and/or email), and answers back by voice. A live dashboard shows every ticket with urgency colours.
 
 Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 
 - **Live demo:** _add your live URL here_
-- **Repository:** _add your GitHub URL here_
+- **Repository:** https://github.com/anuj-bajaj/awaaz
 
 ---
 
@@ -16,7 +16,7 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 1. **Voice in.** The student presses the mic (or Space) and speaks.
 2. **Speech to text.** Groq Whisper large-v3, prompted with example Hinglish sentences.
 3. **Understanding.** An LLM works out the department, location, urgency and deadline, and decides whether to ask a follow-up, create a ticket, merge into an existing one, or answer a status question.
-4. **Real action.** A ticket is written to the database and appears live on the dashboard. When email is configured, the department is emailed.
+4. **Real action.** A ticket is written to the database and appears live on the dashboard. When configured, the department is notified by a Telegram message (works on free hosting) and/or an email.
 5. **Voice out.** The reply is spoken back in the student's language.
 
 ### Example
@@ -34,6 +34,8 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 - **Critical emergencies** (for example "someone fainted") are ticketed immediately with no follow-up.
 - **Confidential cases** (ragging, harassment). Details are masked on the dashboard and in the API, shown as "Confidential case" with a lock icon. A location is required first.
 - **Status by voice**: "What is the status of ticket 7?"
+- **Department notification.** A Telegram message with the ticket details goes to a department chat. Confidential cases send no details, only a "see the dashboard" notice.
+- **CSV export** of all tickets from the dashboard (confidential rows stay masked).
 - **Resolve button**, live stats and a **Reset button** (deletes all tickets, optionally behind a PIN) on the dashboard.
 - **Typed fallback** if the microphone is unavailable.
 - **Ten departments:** Hostel, IT/WiFi, Mess/Canteen, Academics, Transport, Library, Sports, Events/Clubs, Health/Medical, Safety/Admin.
@@ -70,7 +72,7 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 | LLM | Groq `openai/gpt-oss-120b` then `llama-3.3-70b-versatile` (or `GROQ_MODEL`), Gemini flash models as backup, availability checked at startup |
 | Text to speech | edge-tts (`en-IN-NeerjaNeural`, `hi-IN-SwaraNeural`), browser `speechSynthesis` as fallback |
 | Frontend | One file, vanilla JavaScript (`static/index.html`) |
-| Email (optional) | Gmail SMTP |
+| Notifications (optional) | Telegram Bot API over HTTPS, Gmail SMTP |
 
 ---
 
@@ -100,6 +102,10 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 - **Slow text to speech.** Decoupled from the text reply, with a timeout and a browser-voice fallback.
 - **"5 h ago" on a brand-new ticket.** The server saved local time without a timezone marker and the browser read it as Indian time. Timestamps are now saved in UTC with a `Z` marker.
 - **Free hosting wipes local files.** The tickets moved to a hosted PostgreSQL database, and the Reset button became the only way to clear them.
+- **Short answers were thrown away as noise.** A spoken "yes" or "no" to a confirmation question was filtered as a tiny transcript and answered with "I didn't catch that". Only empty transcripts and Whisper's own prompt echo are dropped now.
+- **Private cases leaking into public tickets.** Duplicate detection could in principle merge a confidential report into a normal ticket at the same place. Confidential and normal tickets are now never merged with each other.
+- **No audio on iPhone.** Safari blocks audio that starts after a network call. One audio element is unlocked by the first tap and reused for every reply, and the recording file type follows the browser (mp4 on Safari, webm on Chrome).
+- **Email blocked on free hosting.** Render's free plan blocks SMTP, so a Telegram notification (plain HTTPS) was added as a real action that works on the live demo.
 - **Free hosting sleeps.** A `/healthz` endpoint lets an uptime pinger keep the demo awake.
 
 ---
@@ -111,7 +117,7 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 **Mocked or limited:**
 - The tickets labelled **demo data** are seeded sample tickets (Ctrl+Shift+D) so the dashboard is not empty.
 - There is no real campus department system behind Awaaz. The "department inbox" for email is a single address set in `NOTIFY_TO`, which in the demo is the author's own inbox.
-- The hosted live demo runs without email: the free hosting plan blocks outbound SMTP ports.
+- Email works locally but not on the free hosted demo (outbound SMTP ports are blocked). The hosted demo uses Telegram notifications instead, when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. Both go to a single demo chat or inbox owned by the author, not a real department.
 - The Reset button is available to anyone with the link unless a `RESET_PIN` is set.
 - There is no login. Anyone with the link can create or resolve tickets.
 
@@ -144,6 +150,10 @@ On macOS or Linux, activate with `source venv/bin/activate` and copy with `cp .e
 ### Optional: persistent database, reset PIN, model
 
 Set `DATABASE_URL` (a PostgreSQL connection string) to keep tickets across restarts. Without it a local `tickets.db` file is used. `RESET_PIN` protects the Reset button and `GROQ_MODEL` pins the Groq model. See `.env.example`.
+
+### Optional: notify the department on Telegram
+
+Create a bot with @BotFather, send it a message, and set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (or in Render's Environment tab). Each new ticket is then sent to that chat.
 
 ### Optional: email each new ticket
 
