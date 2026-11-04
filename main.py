@@ -1,15 +1,16 @@
-import os, json, base64, sqlite3, asyncio, re, time, smtplib, ssl
+import os, json, base64, sqlite3, asyncio, re, time, smtplib, ssl, hmac
 from email.message import EmailMessage
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import edge_tts
 from groq import Groq
 from google import genai
 from google.genai import types
-from prompt import build_system_prompt
+from prompt import build_system_prompt, DEPARTMENTS
 
 load_dotenv()
 groq = Groq(api_key=os.environ["GROQ_API_KEY"], timeout=20, max_retries=1)
@@ -26,31 +27,121 @@ SESSION_KIND: dict[str, str] = {}       # session_id -> "ask_followup" (complain
 STATUS_WORDS = re.compile(r"status|ticket|kya hua|kya hoga|update|progress|kab tak|स्टेटस|टिकट|क्या हुआ", re.I)
 
 
+# ---------------------------------------------------------------- time: store UTC, think in IST
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def utc_now() -> str:
+    """Timestamp saved in the database. The trailing Z tells the browser it is UTC."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_ist() -> date:
+    """'Today' for the students, whatever timezone the server runs in."""
+    return datetime.now(IST).date()
+
+
+def as_utc(s):
+    """Rows written by older versions have no timezone marker (they were saved on a UTC server). Mark them as UTC."""
+    if s and not (s.endswith("Z") or re.search(r"[+-]\d\d:\d\d$", s)):
+        return s + "Z"
+    return s
+
+
 # ---------------------------------------------------------------- database
+# DATABASE_URL set  -> PostgreSQL (Neon, Supabase, ...): data survives restarts and redeploys.
+# DATABASE_URL empty -> local SQLite file (fine on a laptop, wiped on Render's free plan).
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+PG = DATABASE_URL.startswith("postgres")
+DB = "tickets.db"
+
+if PG:
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+    POOL = ConnectionPool(DATABASE_URL, min_size=1, max_size=5, open=True, timeout=20,
+                          kwargs={"row_factory": dict_row, "prepare_threshold": None},  # None: works behind pgbouncer
+                          check=ConnectionPool.check_connection)                       # drops connections the host closed
+
+
+class _Cur:
+    def __init__(self, cur, lastrowid=None):
+        self.cur, self.lastrowid = cur, lastrowid
+
+    def fetchone(self):
+        return self.cur.fetchone()
+
+    def fetchall(self):
+        return self.cur.fetchall()
+
+
+class _Conn:
+    """One tiny wrapper so the rest of the code is the same for SQLite and PostgreSQL:
+    '?' placeholders, rows readable by column name, cursor.lastrowid after an INSERT."""
+
+    def __enter__(self):
+        if PG:
+            self._cm = POOL.connection()
+            self.raw = self._cm.__enter__()
+        else:
+            self.raw = sqlite3.connect(DB)
+            self.raw.row_factory = sqlite3.Row
+        return self
+
+    def __exit__(self, et, ev, tb):
+        if PG:
+            return self._cm.__exit__(et, ev, tb)       # commits, or rolls back on error, then returns it to the pool
+        try:
+            self.raw.commit() if et is None else self.raw.rollback()
+        finally:
+            self.raw.close()
+        return False
+
+    def execute(self, sql, params=()):
+        if not PG:
+            cur = self.raw.execute(sql, params)
+            return _Cur(cur, cur.lastrowid)
+        sql = sql.replace("?", "%s")
+        is_insert = sql.lstrip().upper().startswith("INSERT")
+        if is_insert and "RETURNING" not in sql.upper():
+            sql += " RETURNING id"
+        cur = self.raw.execute(sql, params or None)
+        return _Cur(cur, cur.fetchone()["id"] if is_insert else None)
+
+
 def db():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return _Conn()
+
+
+COLUMNS = """department TEXT, category TEXT, summary TEXT, location TEXT,
+            urgency TEXT, deadline TEXT, confidential INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'open', report_count INTEGER DEFAULT 1,
+            created_at TEXT, updated_at TEXT"""
 
 
 def init_db():
     with db() as c:
-        c.execute("""CREATE TABLE IF NOT EXISTS tickets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            department TEXT, category TEXT, summary TEXT, location TEXT,
-            urgency TEXT, deadline TEXT, confidential INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'open', report_count INTEGER DEFAULT 1,
-            created_at TEXT, updated_at TEXT)""")
+        if PG:
+            c.execute(f"CREATE TABLE IF NOT EXISTS tickets (id SERIAL PRIMARY KEY, {COLUMNS}, emailed INTEGER DEFAULT 0)")
+        else:
+            c.execute(f"CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, {COLUMNS})")
+            try:                          # add the column to an existing tickets.db
+                c.execute("ALTER TABLE tickets ADD COLUMN emailed INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
 
 
-    with db() as c:                       # add the column to an existing tickets.db
-        try:
-            c.execute("ALTER TABLE tickets ADD COLUMN emailed INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
+def wipe_tickets():
+    """Used only by the Reset button. Ticket numbers start again from 1."""
+    with db() as c:
+        if PG:
+            c.execute("TRUNCATE TABLE tickets RESTART IDENTITY")
+        else:
+            c.execute("DELETE FROM tickets")
+            c.execute("DELETE FROM sqlite_sequence WHERE name='tickets'")
 
 
 init_db()
+print("Database:", "PostgreSQL (persistent)" if PG else "SQLite file (wiped when a free Render instance restarts)")
 
 
 # ---------------------------------------------------------------- real action: email the department
@@ -167,6 +258,49 @@ def rank(u: str) -> int:
     return URGENCY_RANK.index(u) if u in URGENCY_RANK else 1
 
 
+# ---------------------------------------------------------------- clean what the LLM returns
+DEPT_KEYS = {re.sub(r"[^a-z]", "", d.lower()): d for d in DEPARTMENTS}
+DEPT_ALIAS = {"it": "IT/WiFi", "wifi": "IT/WiFi", "internet": "IT/WiFi", "mess": "Mess/Canteen",
+              "canteen": "Mess/Canteen", "food": "Mess/Canteen", "health": "Health/Medical",
+              "medical": "Health/Medical", "safety": "Safety/Admin", "admin": "Safety/Admin",
+              "event": "Events/Clubs", "events": "Events/Clubs", "club": "Events/Clubs", "clubs": "Events/Clubs"}
+
+
+def norm_department(d):
+    """The LLM sometimes writes 'IT WiFi' or 'hostel maintenance'. Map it to one of our ten names
+    so duplicate detection (which compares departments exactly) keeps working."""
+    if d is None:
+        return None
+    key = re.sub(r"[^a-z]", "", str(d).lower())
+    if key in ("", "null", "none"):
+        return None
+    if key in DEPT_KEYS:
+        return DEPT_KEYS[key]
+    if key in DEPT_ALIAS:
+        return DEPT_ALIAS[key]
+    for k, v in DEPT_KEYS.items():
+        if k in key or (len(key) >= 4 and key in k):
+            return v
+    return "Other"
+
+
+def clean_text(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    return None if s.lower() in ("", "null", "none", "n/a", "unknown") else s
+
+
+def clean_date(v):
+    s = clean_text(v)
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s[:10]).isoformat()
+    except ValueError:
+        return None
+
+
 # ---------------------------------------------------------------- duplicate detection (done by code, not by the LLM)
 GENERIC_PLACE = {"hostel", "block", "room", "court", "the", "in", "at", "of", "main", "campus"}
 STOP = {"the", "and", "for", "not", "demo", "working", "issue", "problem", "with", "from", "this", "that"}
@@ -206,7 +340,7 @@ def find_duplicate(c, plan):
 
 
 def valid_merge_target(row, plan) -> bool:
-    if row is None:
+    if row is None or row["status"] == "resolved":
         return False
     if plan["department"] and row["department"] != plan["department"]:
         return False
@@ -291,7 +425,7 @@ def discover_models():
         print("Could not list Gemini models:", str(e)[:150])
     try:
         for m in groq.models.list().data:
-            if not any(k in m.id for k in ("whisper", "guard", "tts", "playai", "orpheus", "safeguard")):
+            if not any(k in m.id for k in ("whisper", "guard", "tts", "playai", "orpheus", "safeguard", "compound")):
                 groq_models.append(m.id)
     except Exception as e:
         print("Could not list Groq models:", str(e)[:150])
@@ -300,11 +434,25 @@ def discover_models():
     return gem_models, groq_models
 
 
+PREFERRED_GROQ = ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
+
+
+def pick_groq(found: list[str]) -> list[str]:
+    """Deterministic choice: GROQ_MODEL from the environment first, then our preferred models
+    (when the account has them), then whatever else was discovered. Two are kept so a rate limit
+    on the first falls to the second before Gemini is tried."""
+    pinned = os.getenv("GROQ_MODEL", "").strip()
+    pool = found or PREFERRED_GROQ
+    order = ([pinned] if pinned else []) + [m for m in PREFERRED_GROQ if m in pool]
+    order += [m for m in pool if m not in order]
+    return order[:2]
+
+
 _g, _q = discover_models()
 GEMINI_MODELS = _g[:3]
-GROQ_LLM = _q[0] if _q else None
+GROQ_LLMS = pick_groq(_q)
+print("Groq models in use:", GROQ_LLMS)
 print("Gemini models in use:", GEMINI_MODELS)
-print("Groq fallback model:", GROQ_LLM)
 
 COOLDOWN: dict[str, float] = {}   # model -> skip it until this timestamp
 TEXT_ACTIONS = ("ask_followup", "other", "status_query")
@@ -348,13 +496,10 @@ def wrong_script(plan: dict, lang: str) -> bool:
 
 
 def think(history: list[str], open_tickets: list[dict], lang: str) -> dict:
-    system = build_system_prompt(open_tickets, date.today().isoformat())
+    system = build_system_prompt(open_tickets, today_ist().isoformat())
     base = "\n".join(history) + f"\n[REQUIRED REPLY LANGUAGE: {LANG_NAME[lang]}]"
 
-    order = []
-    if GROQ_LLM:
-        order.append(("groq", GROQ_LLM))
-    order += [("gemini", m) for m in GEMINI_MODELS]
+    order = [("groq", m) for m in GROQ_LLMS] + [("gemini", m) for m in GEMINI_MODELS]
 
     for kind, model in order:
         if COOLDOWN.get(model, 0) > time.time():
@@ -366,6 +511,9 @@ def think(history: list[str], open_tickets: list[dict], lang: str) -> dict:
                 for k, v in DEFAULTS.items():
                     if plan.get(k) is None:
                         plan[k] = v
+                plan["department"] = norm_department(plan["department"])
+                plan["location"] = clean_text(plan["location"])
+                plan["deadline"] = clean_date(plan["deadline"])
                 plan["urgency"] = str(plan["urgency"]).lower()
                 if plan["urgency"] not in URGENCY_RANK:
                     plan["urgency"] = "medium"
@@ -380,6 +528,8 @@ def think(history: list[str], open_tickets: list[dict], lang: str) -> dict:
             print(f"{model} failed: {msg[:120]}")
             if "429" in msg or "503" in msg:
                 COOLDOWN[model] = time.time() + 300   # skip this model for 5 minutes
+            elif "decommissioned" in msg or "404" in msg or "does not exist" in msg:
+                COOLDOWN[model] = time.time() + 3600  # retired or unavailable model: stop trying it for an hour
     raise RuntimeError("All LLMs failed")
 
 
@@ -456,7 +606,7 @@ async def process_text(text: str, session_id: str) -> dict:
             action, reply = plan["action"], (plan.get("reply_text") or "").strip()
         except Exception as e:
             print("Retry failed:", e)
-    now = datetime.now().isoformat(timespec="seconds")
+    now = utc_now()
     asked = sum(1 for h in history if h.startswith("Assistant:"))
 
     # safety reports need a location: ask (at most twice) before creating the ticket
@@ -561,6 +711,7 @@ def tickets():
     out = []
     for r in rows:
         t = dict(r)
+        t["created_at"], t["updated_at"] = as_utc(t["created_at"]), as_utc(t["updated_at"])
         if t["confidential"]:   # never show details on the public dashboard
             demo = (t["category"] or "").startswith("[demo]")
             t.update(summary="Confidential case", location=None,
@@ -573,14 +724,14 @@ def tickets():
 def resolve(tid: int):
     with db() as c:
         c.execute("UPDATE tickets SET status='resolved', updated_at=? WHERE id=?",
-                  (datetime.now().isoformat(timespec="seconds"), tid))
+                  (utc_now(), tid))
     return {"ok": True}
 
 
 @app.post("/api/seed")
 def seed():
-    now = datetime.now().isoformat(timespec="seconds")
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    now = utc_now()
+    tomorrow = (today_ist() + timedelta(days=1)).isoformat()
     rows = [
         ("IT/WiFi", "[demo] wifi outage", "Wifi down in Hostel 3 for three days", "Hostel 3", "high", None, 0, 5),
         ("Sports", "[demo] equipment", "Badminton court 2 net is broken", "Court 2", "high", tomorrow, 0, 1),
@@ -590,13 +741,34 @@ def seed():
         ("Safety/Admin", "[demo] confidential", "Confidential", None, "high", None, 1, 1),
     ]
     with db() as c:
-        if c.execute("SELECT 1 FROM tickets WHERE category LIKE '[demo]%'").fetchone():
+        if c.execute("SELECT 1 FROM tickets WHERE category LIKE ?", ("[demo]%",)).fetchone():
             return {"ok": True, "skipped": "demo tickets already seeded"}
         for d, cat, s, loc, u, dl, conf, n in rows:
             c.execute("""INSERT INTO tickets (department, category, summary, location, urgency, deadline,
                          confidential, report_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
                       (d, cat, s, loc, u, dl, conf, n, now, now))
     return {"ok": True}
+
+
+class ResetIn(BaseModel):
+    pin: str = ""
+
+
+@app.post("/api/reset")
+def reset(body: ResetIn):
+    """Deletes every ticket. If RESET_PIN is set in the environment, the right PIN is required."""
+    need = os.getenv("RESET_PIN", "")
+    if need and not hmac.compare_digest(body.pin.encode(), need.encode()):
+        raise HTTPException(status_code=403, detail="Wrong PIN")
+    wipe_tickets()
+    print("All tickets deleted by the Reset button")
+    return {"ok": True}
+
+
+@app.get("/healthz")
+def healthz():
+    """Cheap check for an uptime pinger. It does not touch the database or any LLM."""
+    return {"ok": True, "db": "postgres" if PG else "sqlite", "groq": GROQ_LLMS}
 
 
 os.makedirs("static", exist_ok=True)

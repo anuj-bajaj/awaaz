@@ -34,7 +34,7 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 - **Critical emergencies** (for example "someone fainted") are ticketed immediately with no follow-up.
 - **Confidential cases** (ragging, harassment). Details are masked on the dashboard and in the API, shown as "Confidential case" with a lock icon. A location is required first.
 - **Status by voice**: "What is the status of ticket 7?"
-- **Resolve button** and live stats on the dashboard.
+- **Resolve button**, live stats and a **Reset button** (deletes all tickets, optionally behind a PIN) on the dashboard.
 - **Typed fallback** if the microphone is unavailable.
 - **Ten departments:** Hostel, IT/WiFi, Mess/Canteen, Academics, Transport, Library, Sports, Events/Clubs, Health/Medical, Safety/Admin.
 
@@ -64,9 +64,10 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 
 | Layer | Technology |
 |---|---|
-| Backend | Python, FastAPI, SQLite |
+| Backend | Python, FastAPI |
+| Database | PostgreSQL when `DATABASE_URL` is set (hosted demo), SQLite file locally |
 | Speech to text | Groq Whisper large-v3 |
-| LLM | Groq `openai/gpt-oss-120b` (primary), Gemini flash models (backup), auto-discovered at startup |
+| LLM | Groq `openai/gpt-oss-120b` then `llama-3.3-70b-versatile` (or `GROQ_MODEL`), Gemini flash models as backup, availability checked at startup |
 | Text to speech | edge-tts (`en-IN-NeerjaNeural`, `hi-IN-SwaraNeural`), browser `speechSynthesis` as fallback |
 | Frontend | One file, vanilla JavaScript (`static/index.html`) |
 | Email (optional) | Gmail SMTP |
@@ -80,8 +81,11 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 3. **Duplicate detection is code, not LLM judgement.** Same department, same place and a similar issue. It overrides the LLM and blocks wrong merges such as Hostel 5 into Hostel 3.
 4. **Confidential masking happens at the API level**, so details never reach the dashboard.
 5. **Text first, audio second.** The text reply shows immediately and the audio is fetched separately, so a slow voice never blocks the interface. The browser voice takes over if edge-tts fails or times out (6 seconds).
-6. **Model fallback chain.** Models are discovered at startup. A 429 or 503 puts a model on a five-minute cooldown and the next one answers.
+6. **Deterministic model fallback chain.** Models are discovered at startup, but the order is fixed: `GROQ_MODEL` if set, then the preferred Groq models, then Gemini. A 429 or 503 puts a model on a five-minute cooldown, a retired model on a one-hour cooldown, and the next one answers.
 7. **Seeded demo tickets are labelled `[demo]`** and shown with a "demo data" tag on the dashboard.
+8. **Timestamps are stored in UTC and "today" is computed in IST**, so "2 minutes ago" and "kal" are right whatever timezone the server runs in.
+9. **The LLM's output is cleaned before it touches the database.** Department names are mapped to the ten official ones, and invalid dates and placeholder locations are dropped. A merge into an already resolved ticket is refused.
+10. **Storage that survives restarts.** One small wrapper lets the same code run on PostgreSQL (hosted) and SQLite (local). Tickets are only deleted by the Reset button.
 
 ---
 
@@ -94,6 +98,9 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 - **Whisper parrots its own prompt on silence.** A short sentinel phrase now ends the prompt, and a transcript that is just that phrase, a prompt echo or a tiny audio clip is ignored instead of becoming a ticket.
 - **A follow-up answer read as a status question.** An answer such as "number 12" to "which bus number?" was taken as a request for ticket 12's status. The server now remembers which kind of question is pending and re-asks the model once.
 - **Slow text to speech.** Decoupled from the text reply, with a timeout and a browser-voice fallback.
+- **"5 h ago" on a brand-new ticket.** The server saved local time without a timezone marker and the browser read it as Indian time. Timestamps are now saved in UTC with a `Z` marker.
+- **Free hosting wipes local files.** The tickets moved to a hosted PostgreSQL database, and the Reset button became the only way to clear them.
+- **Free hosting sleeps.** A `/healthz` endpoint lets an uptime pinger keep the demo awake.
 
 ---
 
@@ -105,7 +112,7 @@ Built solo during the Voice AI Hackathon (Vocal Labs, 6 hours).
 - The tickets labelled **demo data** are seeded sample tickets (Ctrl+Shift+D) so the dashboard is not empty.
 - There is no real campus department system behind Awaaz. The "department inbox" for email is a single address set in `NOTIFY_TO`, which in the demo is the author's own inbox.
 - The hosted live demo runs without email: the free hosting plan blocks outbound SMTP ports.
-- The hosted demo uses a temporary database that may reset when the server restarts.
+- The Reset button is available to anyone with the link unless a `RESET_PIN` is set.
 - There is no login. Anyone with the link can create or resolve tickets.
 
 ---
@@ -133,6 +140,10 @@ uvicorn main:app --reload
 Open http://127.0.0.1:8000 and press **Ctrl+Shift+D** once to load demo tickets.
 
 On macOS or Linux, activate with `source venv/bin/activate` and copy with `cp .env.example .env`.
+
+### Optional: persistent database, reset PIN, model
+
+Set `DATABASE_URL` (a PostgreSQL connection string) to keep tickets across restarts. Without it a local `tickets.db` file is used. `RESET_PIN` protects the Reset button and `GROQ_MODEL` pins the Groq model. See `.env.example`.
 
 ### Optional: email each new ticket
 
@@ -163,6 +174,5 @@ requirements.txt   Python dependencies
 ## Limitations and next steps
 
 - Authentication and per-department logins for staff.
-- A persistent hosted database.
 - Real department routing instead of a single inbox.
 - Streaming speech for lower latency.

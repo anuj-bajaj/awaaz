@@ -5,3 +5,5 @@ python-dotenv
 groq
 google-genai
 edge-tts
+psycopg[binary,pool]
+tzdata
