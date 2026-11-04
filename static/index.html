@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Awaaz - Campus Voice Desk</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--line:#2a313c;--text:#e6edf3;--muted:#8b949e;--accent:#4f8cff;
+--critical:#ff4d4f;--high:#ff9f1a;--medium:#f5c542;--low:#3fb950;--conf:#a78bfa}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,sans-serif;height:100vh;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:16px;padding:14px 28px;border-bottom:1px solid var(--line)}
+header h1{font-size:28px;letter-spacing:.5px}
+header .tag{color:var(--muted);flex:1}
+.chip{padding:3px 10px;border-radius:999px;background:#1f2733;border:1px solid var(--line);font-size:13px;color:var(--muted)}
+main{flex:1;display:grid;grid-template-columns:1fr 1.15fr;gap:20px;padding:20px 28px;min-height:0}
+section{background:var(--panel);border:1px solid var(--line);border-radius:16px;display:flex;flex-direction:column;min-height:0}
+section>h2{font-size:15px;color:var(--muted);text-transform:uppercase;letter-spacing:1.5px;padding:16px 20px 8px}
+/* talk */
+#chat{flex:1;overflow-y:auto;padding:8px 20px;display:flex;flex-direction:column;gap:10px}
+.bub{max-width:85%;padding:10px 14px;border-radius:14px;font-size:17px}
+.bub.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+.bub.bot{align-self:flex-start;background:#222a36;border-bottom-left-radius:4px}
+.hint{color:var(--muted);text-align:center;margin:auto;padding:20px}
+.controls{display:flex;flex-direction:column;align-items:center;gap:10px;padding:14px 20px 18px;border-top:1px solid var(--line)}
+#mic{width:96px;height:96px;border-radius:50%;border:none;background:var(--accent);color:#fff;font-size:38px;cursor:pointer;position:relative;transition:transform .1s}
+#mic:hover{transform:scale(1.04)}
+#mic:disabled{background:#3a4352;cursor:not-allowed}
+#mic.listening{background:var(--critical)}
+#mic.listening::after{content:"";position:absolute;inset:-10px;border-radius:50%;border:3px solid var(--critical);animation:ring 1.2s infinite}
+@keyframes ring{0%{transform:scale(.9);opacity:.9}100%{transform:scale(1.35);opacity:0}}
+#status{font-size:15px;color:var(--muted);height:22px;display:flex;align-items:center;gap:8px}
+.dots span{display:inline-block;width:6px;height:6px;margin:0 2px;border-radius:50%;background:var(--accent);animation:bounce 1s infinite}
+.dots span:nth-child(2){animation-delay:.15s}.dots span:nth-child(3){animation-delay:.3s}
+@keyframes bounce{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-6px)}}
+.typebox{display:flex;gap:8px;width:100%}
+.typebox input{flex:1;background:#0d1117;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:10px 12px;font-size:15px}
+button.sm{background:#222a36;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer;font-size:14px}
+button.sm:hover{border-color:var(--accent)}
+/* tickets */
+.stats{display:flex;gap:10px;padding:0 20px 10px}
+.stat{flex:1;background:#0d1117;border:1px solid var(--line);border-radius:12px;padding:8px 12px}
+.stat b{display:block;font-size:26px}.stat span{color:var(--muted);font-size:13px}
+#feed{flex:1;overflow-y:auto;padding:4px 20px 20px;display:flex;flex-direction:column;gap:10px}
+.card{background:#0d1117;border:1px solid var(--line);border-left:6px solid var(--c);border-radius:12px;padding:12px 14px}
+.card.critical{--c:var(--critical);animation:pulse 2s infinite}
+.card.high{--c:var(--high)}.card.medium{--c:var(--medium)}.card.low{--c:var(--low)}
+.card.conf{--c:var(--conf);background:#16121f}
+.card.resolved{opacity:.45;filter:grayscale(1)}
+.card.fresh{animation:slide .5s ease-out}
+.card.critical.fresh{animation:slide .5s ease-out,pulse 2s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,77,79,.0)}50%{box-shadow:0 0 14px 2px rgba(255,77,79,.45)}}
+@keyframes slide{from{transform:translateY(-14px);opacity:0}to{transform:none;opacity:1}}
+@keyframes glow{from{background:#1b2a44}to{background:#0d1117}}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.id{color:var(--muted);font-weight:600}
+.dept{background:#1f2733;border-radius:6px;padding:1px 8px;font-size:13px}
+.badge{border-radius:6px;padding:1px 8px;font-size:12px;font-weight:700;text-transform:uppercase;color:#0d1117;background:var(--c)}
+.tag2{border:1px solid var(--line);border-radius:6px;padding:1px 8px;font-size:12px;color:var(--muted)}
+.sum{font-size:17px;margin:6px 0 4px}
+.meta{color:var(--muted);font-size:13px;display:flex;gap:12px;align-items:center}
+.meta .sp{flex:1}
+.empty{color:var(--muted);text-align:center;margin:auto}
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#3a1d1f;border:1px solid var(--critical);padding:10px 18px;border-radius:10px;display:none}
+@media(max-width:900px){main{grid-template-columns:1fr}body{height:auto}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Awaaz</h1><div class="tag">Speak it. We'll raise it.</div>
+  <span class="chip" id="lang">Language: -</span>
+</header>
+<main>
+  <section>
+    <h2>Talk to Awaaz</h2>
+    <div id="chat"><div class="hint">Press the mic (or Space) and describe your problem in English, Hindi or Hinglish.</div></div>
+    <div class="controls">
+      <button id="mic" title="Click or press Space">&#127908;</button>
+      <div id="status">Ready</div>
+      <div class="typebox">
+        <input id="txt" placeholder="or type instead...">
+        <button class="sm" id="send">Send</button>
+        <button class="sm" id="newc">New</button>
+      </div>
+    </div>
+  </section>
+  <section>
+    <h2>Live Tickets</h2>
+    <div class="stats">
+      <div class="stat"><b id="s-open">0</b><span>Open</span></div>
+      <div class="stat"><b id="s-crit" style="color:var(--critical)">0</b><span>Critical</span></div>
+      <div class="stat"><b id="s-res" style="color:var(--low)">0</b><span>Resolved</span></div>
+      <div class="stat"><b id="s-tot">0</b><span>Total</span></div>
+    </div>
+    <div id="feed"><div class="empty">No tickets yet.</div></div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+let sessionId = crypto.randomUUID();
+let recorder = null, chunks = [], busy = false;
+const $ = id => document.getElementById(id);
+const mic = $("mic"), chat = $("chat"), statusEl = $("status");
+
+function setStatus(s){
+  statusEl.innerHTML = s === "Thinking" ? 'Thinking <span class="dots"><span></span><span></span><span></span></span>' : s;
+}
+function toast(msg){
+  const t = $("toast"); t.textContent = msg; t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 5000);
+}
+function bubble(text, who){
+  const h = chat.querySelector(".hint"); if (h) h.remove();
+  const d = document.createElement("div"); d.className = "bub " + who; d.textContent = text;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+function lock(on){ busy = on; mic.disabled = on; $("send").disabled = on; }
+
+async function post(url, opts){
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 30000);
+  try {
+    const r = await fetch(url, {...opts, signal: ctl.signal});
+    if (!r.ok) throw new Error("Server error " + r.status);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+
+/* ---------- recording ---------- */
+async function startRec(){
+  if (busy) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true, noiseSuppression:true}});
+    const rec = new MediaRecorder(stream); recorder = rec; chunks = [];
+    rec.ondataavailable = e => chunks.push(e.data);
+    rec.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      sendAudio(new Blob(chunks, {type: rec.mimeType || "audio/webm"}));
+    };
+    rec.start(); mic.classList.add("listening"); setStatus("Listening...");
+  } catch (e) {
+    toast("Microphone blocked. Type instead."); $("txt").focus();
+  }
+}
+function stopRec(){
+  if (recorder && recorder.state === "recording"){
+    mic.classList.remove("listening"); setStatus("Thinking"); lock(true);
+    const r = recorder; recorder = null;          // a second press can't stop it twice
+    setTimeout(() => { if (r.state === "recording") r.stop(); }, 500);
+  }
+}
+mic.onclick = () => (recorder && recorder.state === "recording") ? stopRec() : startRec();
+document.addEventListener("keydown", e => {
+  if (e.code === "Space" && document.activeElement.tagName !== "INPUT"){ e.preventDefault(); mic.click(); }
+  if (e.ctrlKey && e.shiftKey && e.code === "KeyD"){ seed(); }
+});
+
+/* ---------- sending ---------- */
+async function sendAudio(blob){
+  lock(true); setStatus("Thinking");
+  const fd = new FormData(); fd.append("audio", blob, "speech.webm"); fd.append("session_id", sessionId);
+  try { handle(await post("/api/voice", {method:"POST", body:fd})); }
+  catch (e){ console.error(e); toast("Failed: " + e.message); lock(false); setStatus("Ready"); }
+}
+async function sendText(){
+  const v = $("txt").value.trim(); if (!v || busy) return; $("txt").value = "";
+  lock(true); setStatus("Thinking");
+  try {
+    handle(await post("/api/text", {method:"POST", headers:{"Content-Type":"application/json"},
+                                    body: JSON.stringify({text:v, session_id:sessionId})}));
+  } catch (e){ console.error(e); toast("Failed: " + e.message); lock(false); setStatus("Ready"); }
+}
+$("send").onclick = sendText;
+$("txt").onkeydown = e => { if (e.key === "Enter") sendText(); };
+$("newc").onclick = () => { sessionId = crypto.randomUUID(); chat.innerHTML = '<div class="hint">New conversation started.</div>'; };
+
+/* ---------- reply + voice ---------- */
+function browserSpeak(text, lang, done){
+  if (!("speechSynthesis" in window)) return done();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = lang === "hi" ? "hi-IN" : "en-IN";
+  u.onend = u.onerror = done;
+  speechSynthesis.speak(u);
+}
+
+async function handle(d){
+  const done = () => { lock(false); setStatus("Ready"); };
+  if (!d) { toast("Empty reply from server"); return done(); }
+  try {
+    if (d.transcript) bubble(d.transcript, "user");
+    bubble(d.reply, "bot");
+    if (d.lang) $("lang").textContent = "Language: " + d.lang.toUpperCase();
+    loadTickets();
+    setStatus("Speaking");
+
+    let b64 = d.audio_b64;
+    if (!b64){
+      try {
+        b64 = (await post("/api/tts", {method:"POST", headers:{"Content-Type":"application/json"},
+               body: JSON.stringify({text: d.reply, lang: d.lang || "en"})})).audio_b64;
+      } catch (e){ console.error(e); }
+    }
+    if (b64){
+      const a = new Audio("data:audio/mp3;base64," + b64);
+      a.onended = done;
+      a.onerror = () => browserSpeak(d.reply, d.lang, done);
+      a.play().catch(() => browserSpeak(d.reply, d.lang, done));
+    } else {
+      browserSpeak(d.reply, d.lang, done);
+    }
+  } catch (e){ console.error(e); toast("Display error: " + e.message); done(); }
+}
+
+/* ---------- tickets ---------- */
+const cards = new Map(); let firstLoad = true;
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function ago(iso){
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return "just now"; if (s < 3600) return Math.floor(s/60) + " min ago";
+  if (s < 86400) return Math.floor(s/3600) + " h ago"; return Math.floor(s/86400) + " d ago";
+}
+function cardHTML(t){
+  const conf = t.confidential;
+  return `<div class="row"><span class="id">#${t.id}</span>
+    <span class="dept">${conf ? "&#128274; Confidential" : esc(t.department)}</span>
+    <span class="badge">${esc(t.urgency)}</span>
+    ${t.status === "resolved" ? '<span class="tag2">resolved</span>' : '<span class="tag2">open</span>'}
+    ${t.report_count > 1 ? `<span class="tag2">x${t.report_count} reports</span>` : ""}
+    ${(t.category || "").startsWith("[demo]") ? '<span class="tag2" style="color:#f5c542;border-color:#f5c542">demo data</span>' : ""}
+    ${t.emailed ? '<span class="tag2" style="color:#3fb950;border-color:#3fb950">&#9993; emailed</span>' : ""}
+    ${t.deadline ? `<span class="tag2">due ${esc(t.deadline)}</span>` : ""}</div>
+    <div class="sum">${conf ? "Confidential case" : esc(t.summary)}</div>
+    <div class="meta"><span>${t.location && !conf ? esc(t.location) : ""}</span><span class="sp"></span>
+    <span>${ago(t.created_at)}</span>
+    ${t.status !== "resolved" ? `<button class="sm" onclick="resolveT(${t.id})">Resolve</button>` : ""}</div>`;
+}
+async function loadTickets(){
+  let list; try { list = await (await fetch("/api/tickets")).json(); } catch { return; }
+  const feed = $("feed");
+  if (!list.length){ feed.innerHTML = '<div class="empty">No tickets yet.</div>'; cards.clear(); return; }
+  const e = feed.querySelector(".empty"); if (e) e.remove();
+  const sorted = [...list].sort((a,b) => (a.status==="resolved") - (b.status==="resolved") || b.id - a.id);
+  sorted.forEach(t => {
+    let el = cards.get(t.id);
+    const cls = "card " + t.urgency + (t.confidential ? " conf" : "") + (t.status === "resolved" ? " resolved" : "");
+    const html = cardHTML(t);
+    if (!el){
+      el = document.createElement("div"); cards.set(t.id, el);
+      el.className = cls + (firstLoad ? "" : " fresh"); el.innerHTML = html; el._sig = html;
+    } else if (el._sig !== html){
+      el.className = cls; el.innerHTML = html; el._sig = html;
+    }
+    feed.appendChild(el);
+  });
+  firstLoad = false;
+  const open = list.filter(t => t.status !== "resolved");
+  $("s-open").textContent = open.length;
+  $("s-crit").textContent = open.filter(t => t.urgency === "critical").length;
+  $("s-res").textContent = list.length - open.length;
+  $("s-tot").textContent = list.length;
+}
+async function resolveT(id){ await fetch(`/api/tickets/${id}/resolve`, {method:"POST"}); loadTickets(); }
+async function seed(){ await fetch("/api/seed", {method:"POST"}); loadTickets(); toast("Demo tickets seeded"); }
+loadTickets(); setInterval(loadTickets, 2000);
+</script>
+</body>
+</html>
